@@ -17,12 +17,20 @@ The sniffer program will recover the LAP of local devices while also narrowing d
 
 #### Install Dependencies #####
 ```
+sudo apt-get install bluez libbluetooth-dev python-setuptools python3-setuptools python3-zmq
 cd libbtbb
 mkdir build
 cd build
 cmake ..
 make && sudo make install && sudo ldconfig
-sudo apt-get install bluez libbluetooth-dev python-setuptools python3-setuptools python3-zmq
+git clone -b UHD-3.9.LTS --single-branch https://github.com/EttusResearch/uhd.git
+cd uhd/host
+mkdir build
+cd build
+cmake ..
+make
+sudo make install
+sudo ldconfig
 ```
 
 #### Install Ubertooth ####
