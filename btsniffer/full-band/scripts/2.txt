@@ -1,0 +1,12 @@
+START 1678127199.42261806
+delay = -22712
+skip = 0
+QQQQQQQQQQ FINAL TIME 11011750 11011750
+********** FINAL DUMP
+---- Dumping 9F8C90
+lap = 10456208
+brute_forced = 1
+ts = 0
+lap = 9F8C90
+0 0 0 0 0 0 0 0
+remember to fix the changedelay function

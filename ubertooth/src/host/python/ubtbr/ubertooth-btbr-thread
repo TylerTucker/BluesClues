@@ -1,0 +1,483 @@
+#!/usr/bin/python3
+from ubtbr.btctl import *
+import sqlite3
+from sqlite3 import Error
+import time
+import datetime
+import zmq
+from queue import PriorityQueue
+import heapq as hq
+import signal, os
+import threading
+
+class BTCtlL2Ping(BTCtlPagingCmd):
+	def __init__(self, bt, bdaddr):
+		super().__init__(bt, bdaddr)
+		self._l2cap_command_id = 0xc8
+
+	def _send_l2cap_echo_req(self):
+		self.send_acl(LLID_L2CAP_START,
+			p16(8)	# length
+			+p16(1)	# cid l2cap sig channel
+			+p8(8)	# command code 2: echo req
+			+p8(self._l2cap_command_id) # command id
+			+p16(4)	# command length: 4
+			+b"ECHO"
+		)
+		self._l2cap_command_id += 1
+		if self._l2cap_command_id > 0xff:
+			self._l2cap_command_id = 0xc8
+
+	def handle_setup_complete(self):
+		# log.info("LMP setup complete")
+		# send dummy l2cap packet
+		self._send_l2cap_echo_req()
+
+	def _handle_l2cap(self, pkt):
+		acl = pkt.bt_data
+		# log.info("RX L2CAP: %s"%acl)
+		self._send_l2cap_echo_req()
+
+class Blues():
+
+	# Initialize class
+	def __init__(self, bt):
+		self._bt = bt
+		self._cmd = None
+		self._paging_success = False
+		self._paging_failure = False
+		self._paging_timeout = False
+		self._done = False
+		self._update = threading.Event()
+		self._lock = threading.Lock()
+		self._laps = {}
+		self._heap = []
+		self._complete = {}
+		self._blacklist = {'445566', '093d9d'}
+		self._whitelist = {'77ad02', 'a3a2d2'}
+		self.active = True
+		super().__init__()
+
+	# Parse a given Bluetooth address
+	def _parse_bdaddr(self, inp):
+		bdaddr = None
+		try:
+			bdaddr = int(inp.replace(":",""),16)
+		except:
+			pass
+		if bdaddr is None or bdaddr < 0 or bdaddr >= (1<<48):
+			print("Invalid BD_ADDR")
+		else:
+			return bdaddr
+
+	# Start an Ubertooth task
+	def start_cmd(self, cls, *args):
+		# print("Start Command Called")
+		if self._cmd is not None:
+			log.info ("Not idle")
+			return
+
+		# Reset states
+		self._paging_success = False
+		self._paging_failure = False
+		self._paging_timeout = False
+
+		# log.info("Starting %s" % cls.__name__)
+		args = [self._bt] + list(args)
+		self._cmd = cls(*args)
+		print(self._cmd)
+		self._cmd.start()
+		self._done = False
+		return self._cmd
+
+	# Stop current Ubertooth command
+	def stop_cmd(self):
+		# print('Stop command called')
+		if self._cmd != None:
+			if self._cmd.__str__() == 'BTCtlPagingCmd':
+				if self._cmd.page_state:
+					if self._cmd.page_state == BTCTL_STATE_FOUND:
+						print('\n\nEXITED CAUSE WE FOUND THAT SHIT\n\n')
+						self._paging_success = True
+					elif self._cmd.page_state == BTCTL_STATE_WRONG:
+						print('\n\nEXITED CAUSE WE WRONG\n\n')
+						self._paging_failure = True
+					elif self._cmd.page_state == BTCTL_STATE_QUIET:
+						print('\n\nEXITED CAUSE WE GOT GHOSTED\n\n')
+						self._paging_timeout = True
+					else:
+						self._paging_failure = True
+						print('\n\nEXITED FOR NO DAMN REASON\n\n')
+						return 1
+			self._cmd.stop()
+			self._cmd.join()
+			self._done = True
+			self._cmd = None
+			return 0
+
+	# Update variables from Ubertooth status
+	def check_status(self):
+		if self._cmd != None:
+			if self._cmd.__str__() == 'BTCtlPagingCmd':
+				if self._cmd.page_state == BTCTL_STATE_FOUND:
+					print('\n\nFOUND\n\n')
+					# print('\n\nEXITED CAUSE WE FOUND THAT SHIT\n\n')
+					self._paging_success = True
+				elif self._cmd.page_state == BTCTL_STATE_WRONG:
+					print('\n\nWRONG\n\n')
+					# print('\n\nEXITED CAUSE WE WRONG\n\n')
+					self._paging_failure = True
+				elif self._cmd.page_state == BTCTL_STATE_QUIET:
+					print('\n\nNO RESPONSE\n\n')
+					# print('\n\nEXITED CAUSE WE GOT GHOSTED\n\n')
+					self._paging_timeout = True
+				else:
+					print('\n\nEXITED\n\n')
+					self._paging_failure = True
+					# print('\n\nEXITED FOR NO DAMN REASON\n\n')
+					return 1
+			self._cmd.join()
+			self._done = True
+			self._cmd = None
+
+	# Gather information from SDR, then update data structures for Ubertooth
+	def listener(self):
+
+		# Boolean values for debugging
+		MESSAGES = False
+		TESTING = False
+
+		# Create socket for ZMQ messaging
+		context = zmq.Context()
+		socket = context.socket(zmq.PAIR)
+		socket.bind("tcp://127.0.0.1:5555")
+
+		# Loop to get messages
+		# while True:
+		while self.active:
+			message = socket.recv()
+			message_str = message.decode('utf-8', 'ignore')
+
+			# Only continue if given a valid header message
+			if message_str == 'LAP':
+
+				try:
+
+					# Receive LAP from socket
+					message = socket.recv(flags=zmq.NOBLOCK)
+					lap = format(int.from_bytes(message, byteorder='little'), '06x')
+
+					# Receive count from socket
+					message = socket.recv(flags=zmq.NOBLOCK)
+					count = int.from_bytes(message, byteorder='little')
+
+					if MESSAGES:
+						print('\n&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&')
+						print('LAP | ' + lap)
+						print('Count | %d' % count)
+
+					# Ensure that a valid count was given
+					if (count > 0) and (count < 256):
+
+						MESSAGES and print('Valid count is %d' % count)
+						uap_str = ''
+
+						# Receive each possible UAP from socket
+						uaps = set()
+						my_count = 0
+						for i in range(0,count):
+							message = socket.recv(flags=zmq.NOBLOCK)
+							uap = int.from_bytes(message, byteorder='little')
+							# Only add valid UAPs to set
+							if (uap >= 0) and (uap < 256):
+								uaps.add(format(uap, '02x'))
+								uap_str += format(uap, '02x') + ', '
+								my_count += 1
+
+						# Handle special UAP = '0x00' case
+						if my_count == count - 1:
+							uaps.add(format(0,'02x'))
+						elif my_count < count:
+							print('BREAKKKKKKKKININININGNINGINGINGINGNIGNIG')
+							break
+
+						# Skip LAP if it has already been broken
+						self._lock.acquire()
+						if (lap in self._complete) and (lap not in self._blacklist):
+						# if ((lap in self._complete) or (lap in self._blacklist)):
+							continue
+						self._lock.release()
+
+						MESSAGES and print(uap_str[:-2])
+
+						# Update LAP entry if applicable, if not add it to the dictionary and priority queue
+						if lap in self._laps:
+
+							# Only update UAP list if they have been narrowed down
+							if self._laps[lap]['total'] > count:
+
+								MESSAGES and print('Updating dictionary entry')
+
+								self._lock.acquire()
+								self._heap = [(val, key) for (val, key) in self._heap if key != lap]
+								# self._heap.remove((len(self._laps[lap]['try']), lap))
+								hq.heapify(self._heap)
+
+								# Find intersection between current UAP set and new reduced set
+								self._laps[lap]['all'] = uaps.copy()
+								self._laps[lap]['try'] = self._laps[lap]['try'] & uaps
+
+								# Update UAP count with length of resulting set
+								self._laps[lap]['total'] = count
+								# Push LAP onto heap with new count value
+								hq.heappush(self._heap, (len(self._laps[lap]['try']), lap))
+
+								if len(self._laps[lap]['try']) == 0:
+									print('Thread: Update')
+
+								self._lock.release()
+								self._update.set()
+
+								if TESTING:
+									print(self._heap)
+									self.print_dictionary()
+						elif lap not in self._blacklist and lap in self._whitelist:
+
+							MESSAGES and print('Adding new dictionary entry')
+
+							self._lock.acquire()
+
+							# Add new entry into dictionary
+							self._laps[lap] = {}
+							self._laps[lap]['total'] = count
+							self._laps[lap]['all'] = uaps.copy()
+							self._laps[lap]['try'] = uaps.copy()
+							self._laps[lap]['time'] = time.time()
+
+							hq.heappush(self._heap, (count, lap))
+							hq.heapify(self._heap)
+
+							if len(self._laps[lap]['try']) == 0:
+								print('Thread: New')
+							self._lock.release()
+							self._update.set()
+
+							if TESTING:
+								print(self._heap)
+								self.print_dictionary()
+					MESSAGES and print('&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&')
+
+				# Ignore the 'again' exception and assume no new message is available
+				except zmq.Again as e:
+					pass
+
+		print('Unbinding socket')
+		socket.unbind("tcp://127.0.0.1:5555")
+
+	# Exit program and kill listener thread
+	def exit(self, signum, frame):
+		# self.stop_cmd()
+		if self._cmd:
+			self._cmd.stop()
+			self._cmd.join()
+		self._done = True
+		self._cmd = None
+
+		# Print final result
+		if self._complete:
+			print(self._complete)
+
+		self.active = False
+
+		# sys.exit(0)
+
+	# Print LAP dictionary
+	def print_dictionary(self):
+		print('\nDictionary ---------------------------------------------------\n')
+		for k in self._laps.keys():
+			print(k)
+			print('Total: %d' % self._laps[k]['total'])
+			print('All: <Set of size %d>' % len(self._laps[k]['all']))
+			print('Try: <Set of size %d>' % len(self._laps[k]['try']), end = '\n\n')
+		print('--------------------------------------------------------------')
+
+	# Main function loop
+	def run(self):
+
+		# Set handlers for exit signals
+		signal.signal(signal.SIGTERM, self.exit)
+		signal.signal(signal.SIGINT, self.exit)
+
+		# Ensure the Ubertooth is not busy
+		self.stop_cmd()
+
+		# Boolean to enter debug mode
+		UBERTOOTH = True
+
+		# Start listener thread to capture ZMQ messages
+		thread = threading.Thread(target=self.listener)
+		thread.daemon = True
+		thread.start()
+
+		# Loop to handle socket messages from SDR program
+		while self.active:
+
+			# Evaluate paging result if Ubertooth is finished
+			if (self._heap and not self._cmd) or (self._cmd and self._cmd._done):
+				# print('Ubertooth is done')
+				if self.check_status():
+					self.stop_cmd()
+
+				# Ubertooth established a connection
+				if self._paging_success:
+
+					# Remove LAP from dictionary and heap
+					self._lock.acquire()
+					if len(self._laps[page_lap]['try']) > 0:
+						self._heap = [(val, key) for (val, key) in self._heap if key != page_lap]
+						# self._heap.remove((len(self._laps[page_lap]['try']), page_lap))
+						hq.heapify(self._heap)
+					self._complete[page_lap] = (page_uap, time.time() - self._laps[page_lap]['time'])
+					del self._laps[page_lap]
+					self._lock.release()
+
+					# Write result to file
+					with open('results.txt', 'a') as file:
+						file.write(str(self._complete[page_lap][1]) + '\n')
+
+					if UBERTOOTH:
+						print('**********************************************')
+						print('LAP ' + page_lap + ' cracked')
+						print('**********************************************')
+
+
+					self._paging_success = False
+
+				# Ubertooth guessed the wrong UAP
+				elif self._paging_failure:
+					# elif self._paging_failure or self._paging_timeout:
+					self._paging_failure = False
+
+					UBERTOOTH and print('Incorrect guess for ' + uap_lap)
+					print('Length of set is %d' % len(self._laps[page_lap]['try']))
+					print(self._heap)
+					if len(self._laps[page_lap]['try']) > 0:
+						# Remove LAP from heap
+						self._lock.acquire()
+						self._heap = [(val, key) for (val, key) in self._heap if key != page_lap]
+						# self._heap.remove((len(self._laps[page_lap]['try']), page_lap))
+						hq.heapify(self._heap)
+
+						# Re-add LAP to heap
+						hq.heappush(self._heap, (len(self._laps[page_lap]['try']), page_lap))
+						self._lock.release()
+
+					# If we run out of UAPs to try without success, add LAP to blacklist
+					else:
+						# print('WE RAN OUTTTTTTT')
+						self._blacklist.add(page_lap)
+
+						self._lock.acquire()
+						# Remove LAP from heap
+						self._heap = [(val, key) for (val, key) in self._heap if key != page_lap]
+						# self._heap.remove((len(self._laps[page_lap]['try']) + 1, page_lap))
+						hq.heapify(self._heap)
+						# Remove LAP from dictionary
+						del self._laps[page_lap]
+						self._lock.release()
+
+					if UBERTOOTH:
+						print('Command is ' + self._cmd.__str__())
+						print(self._heap)
+						self.print_dictionary()
+
+					self._paging_failure = False
+
+				# Ubertooth didn't get a response
+				# elif self._paging_timeout:
+				#
+				# 	UBERTOOTH and print('Timeout for ' + uap_lap)
+				#
+				# 	# Remove LAP from dictionary and heap
+				# 	self._lock.acquire()
+				# 	if len(self._laps[page_lap]['try']) > 0:
+				# 		self._heap.remove((len(self._laps[page_lap]['try']), page_lap))
+				# 		hq.heapify(self._heap)
+				# 	del self._laps[page_lap]
+				# 	self._lock.release()
+				#
+				# 	if UBERTOOTH:
+				# 		print('Command is ' + self._cmd.__str__())
+				# 		print(self._heap)
+				# 		self.print_dictionary()
+				#
+				# 	self._paging_timeout = False
+
+				# Only send a command to the Ubertooth if there is still something left
+				if self._heap and int(self._heap[0][0]) < 5:
+					print(self._heap)
+					if self._heap[0][0] == 0:
+						self._heap = [(val, key) for (val, key) in self._heap if key != page_lap]
+					else:
+						print('Grabbing next address')
+						self._lock.acquire()
+						# Get next address for Ubertooth
+						page_lap = hq.heappop(self._heap)[1]
+						page_uap = list(self._laps[page_lap]['try'])[-1]
+						self._laps[page_lap]['try'].remove(page_uap)
+						# page_uap = self._laps[page_lap]['try'].pop()
+						uap_lap = page_uap + page_lap
+						# my_page = BTCtlPagingCmd
+
+						# Send paging command to Ubertooth
+						self.connect(uap_lap)
+						print('\nPAGING ' + uap_lap + '\n')
+
+						# Re-evaluate heap and update dictionary
+						if (len(self._laps[page_lap]['try']) == 0) and (len(self._heap) > 1):
+							self._laps[page_lap]['try'] = self._laps[page_lap]['all'].copy()
+						hq.heappush(self._heap, (len(self._laps[page_lap]['try']), page_lap))
+						self._lock.release()
+
+			# CPU management
+			time.sleep(0.1)
+
+		print('Done?')
+		# self._lock.release()
+		self._bt.close()
+
+	# Try connecting to a Bluetooth device
+	def connect(self, inp):
+		bdaddr = self._parse_bdaddr(inp)
+		if bdaddr is not None:
+			self.start_cmd(BTCtlPagingCmd, bdaddr)
+
+
+def main():
+	#create database here for use later
+	try:
+		con = sqlite3.connect('blues.sqlite')
+		cur = con.cursor()
+		# PRIMARY KEY
+		cur.execute('''CREATE TABLE IF NOT EXISTS devices(
+			addr TEXT,
+			name TEXT NOT NULL,
+			manu TEXT,
+			ver TEXT,
+			subver TEXT);''')
+		con.commit()
+		con.close()
+	except Error as e:
+		print("Sqlite error" % str(e))
+	freq_off = 2
+	bt = BTCtl.find()
+	bt.connect()
+	bt.send_set_freq_off_cmd(freq_off)
+	eir = BTCtlEIR([(BTCtlEIR.EIR_COMPLETE_LOCAL_NAME, b"Ubertooth"),])
+	bt.send_set_eir_cmd(eir.pack())
+	sleep(0.02)
+	blue = Blues(bt)
+	blue.run()
+	sys.exit(0)
+
+if __name__ == '__main__': main()

@@ -38,7 +38,7 @@ sudo ldconfig
 We adapted the installation instructions found [here](https://github.com/greatscottgadgets/ubertooth/wiki/Build-Guide) with the most recent GitHub repository.
 
 ```
-cd ubertooth/host
+cd ubertooth/src/host
 mkdir build
 cd build
 cmake ..
