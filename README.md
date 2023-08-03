@@ -15,6 +15,19 @@ The sniffer program will recover the LAP of local devices while also narrowing d
 
 ### Installation ###
 
+We provide install and uninstall scripts for convenience. This scripts assumes that you do not have UHD 3.15 LTS, ubertooth, libbtbb, or btsniffer previously installed on your machine. To use those, run:
+```
+chmod +x install.sh
+sudo ./install.sh
+```
+or
+```
+chmod +x uninstall.sh
+sudo ./uninstall.sh
+```
+
+To perform a manual installation, follow the steps below.
+
 #### Install Dependencies #####
 ```
 sudo apt-get install bluez libbluetooth-dev python-setuptools python3-setuptools python3-zmq gcc-arm-none-eabi libnewlib-arm-none-eabi
