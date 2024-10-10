@@ -12,13 +12,15 @@ docker build -t bluesclues .
 
 # Running
 
-To allow the docker container to access USB devices, we pass the USB device folder to the container. Once the container opens, follow the usage instructions. We need to run two programs simultaneously to achieve full de-anonymization. In one tmux session, we run the btsniffer code. In a second, we run the Ubertooth code.
+To allow the docker container to access USB devices, we pass the USB device folder to the container. Once the container opens, follow the usage instructions. We need to run two programs simultaneously to achieve full de-anonymization. Using a tmux session, we run the btsniffer code. The, we run the Ubertooth code in the main shell.
 
 ```bash
 docker run -it --device=/dev/bus/usb:/dev/bus/usb bluesclues /bin/bash
 # Program Ubertooth
+cd /BluesClues/ubertooth/src/firmware/btbr
 ubertooth-dfu -d btbr.dfu -r
 # Run Bluetooth sniffer in a tmux session
+cd btsniffer/single-board/build/
 tmux new -s btsniffer
 ./btsniffer
 # Hit 'CTRL+B', then 'D' to detach from the tmux session
@@ -27,9 +29,4 @@ cd /BluesClues/ubertooth/src/host/python/ubtbr
 ./ubertooth-btbr-thread
 ```
 
-Run ubertooth:
-```
-./ubertooth-btbr-thread
-```
-
-The ubertooth program will log successfully-detected devices in an SQLite file called ```blues.sqlite```
+The ubertooth program will log device information to an SQLite file called `blues.sqlite` in the `ubtbr` directory.

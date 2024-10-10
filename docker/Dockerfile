@@ -23,7 +23,7 @@ RUN     ldconfig
 RUN     uhd_images_downloader
 
 # Download BluesClues dependencies
-RUN apt-get install -y python3-pip python3-venv bluez libbluetooth-dev python3-zmq gcc-arm-none-eabi libnewlib-arm-none-eabi python-zmq libczmq-dev tmux
+RUN apt-get install -y python3-pip python3-venv bluez libbluetooth-dev python3-zmq gcc-arm-none-eabi libnewlib-arm-none-eabi python-zmq libczmq-dev tmux udev libudev-dev
 
 # Get BluesClues code
 WORKDIR /
@@ -36,7 +36,7 @@ WORKDIR /BluesClues/libbtbb/build
 RUN     cmake ..
 RUN     make && make install && ldconfig
 
-# Install ubertooth
+# Install Ubertooth code
 WORKDIR /BluesClues/ubertooth/src/host
 RUN     mkdir build
 WORKDIR /BluesClues/ubertooth/src/host/build
@@ -62,7 +62,7 @@ RUN     make -j $MAKEWIDTH
 WORKDIR /BluesClues
 RUN     python3 -m venv ./venv
 RUN     /bin/bash -c 'source ./venv/bin/activate'
-RUN	python3 -m pip install -r requirements.txt
+RUN     python3 -m pip install -r requirements.txt
 
 # Enable USB passthrough
 RUN apt install -y avahi-daemon avahi-utils dbus
